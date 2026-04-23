@@ -1,0 +1,45 @@
+# dati.gov.it Community Connector Spec
+# This file defines the specification for the connector including
+# connection parameters and allowlist options.
+
+# ============================================================================
+# Display Name
+# ============================================================================
+display_name: Dati.gov.it
+
+# ============================================================================
+# Connection Parameters
+# These are provided when creating the Unity Catalog connection.
+# ============================================================================
+connection:
+  parameters:
+    - name: base_url
+      type: string
+      required: false
+      description: >
+        Base URL for the CKAN Action API endpoint.
+        Defaults to https://www.dati.gov.it/opendata/api/3/action if not specified.
+        Override this to connect to other CKAN-based Italian open data portals
+        (e.g., regional CKAN instances) that share this connector's logic.
+
+    - name: api_key
+      type: string
+      required: false
+      secret: true
+      description: >
+        Optional API key for CKAN authorization (passed as Authorization header).
+        dati.gov.it is fully public for read operations and does not require authentication.
+        This field is provided for compatibility with restricted CKAN instances
+        or future write operations. Leave empty for anonymous read-only access to dati.gov.it.
+
+# ============================================================================
+# External Options Allowlist
+# These table-specific options must be included in the externalOptionsAllowList
+# parameter of the UC connection to allow them to be passed through.
+# Use a comma-separated string of option names.
+# If no table-specific options are needed, set to empty string or omit.
+#
+# NOTE: This list is a placeholder and will be regenerated in Step 5 after
+# the implementation is complete and external_options are finalized.
+# ============================================================================
+external_options_allowlist: ""
