@@ -422,33 +422,26 @@ class DatiGovItLakeflowConnect(LakeflowConnect, SupportsPartitionedStream):
     def _read_tags(
         self, table_options: dict[str, str]
     ) -> tuple[Iterator[dict], dict]:
-        """Enumerate tags via ``tag_list?all_fields=true``.
+        """Enumerate tags via a single ``tag_list?all_fields=true`` call.
 
-        ``all_fields=true`` on ``tag_list`` returns {id, name, display_name,
-        vocabulary_id} per tag, which is everything the flat schema needs —
-        no per-tag ``tag_show`` call required.
+        ``all_fields=true`` returns {id, name, display_name, vocabulary_id}
+        per tag — everything the flat schema needs.
+
+        CKAN's ``tag_list`` action does not paginate: the dati.gov.it
+        instance ignores ``limit``/``offset`` and always returns the full
+        set (~16k tags). Pass no pagination params and take the single
+        response as authoritative.
         """
-        records: list[dict] = []
-        offset = 0
-        while True:
-            batch = self._client.get(
-                "tag_list",
-                params={"all_fields": True, "limit": PAGE_SIZE, "offset": offset},
-            )
-            if not batch:
-                break
-            for tag in batch:
-                records.append(
-                    {
-                        "id": tag.get("id"),
-                        "name": tag.get("name"),
-                        "display_name": tag.get("display_name"),
-                        "vocabulary_id": tag.get("vocabulary_id"),
-                    }
-                )
-            if len(batch) < PAGE_SIZE:
-                break
-            offset += len(batch)
+        batch = self._client.get("tag_list", params={"all_fields": True})
+        records = [
+            {
+                "id": tag.get("id"),
+                "name": tag.get("name"),
+                "display_name": tag.get("display_name"),
+                "vocabulary_id": tag.get("vocabulary_id"),
+            }
+            for tag in (batch or [])
+        ]
         return iter(records), {}
 
     def _read_groups(
