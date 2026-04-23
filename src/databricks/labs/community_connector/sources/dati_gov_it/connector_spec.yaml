@@ -38,8 +38,5 @@ connection:
 # parameter of the UC connection to allow them to be passed through.
 # Use a comma-separated string of option names.
 # If no table-specific options are needed, set to empty string or omit.
-#
-# NOTE: This list is a placeholder and will be regenerated in Step 5 after
-# the implementation is complete and external_options are finalized.
 # ============================================================================
-external_options_allowlist: ""
+external_options_allowlist: "organization,tags,groups,res_format,q,include_deleted,window_seconds,max_records_per_batch,start_timestamp"
