@@ -42,10 +42,13 @@ PAGE_SIZE = 1000
 
 # User-Agent identifies the connector to the upstream portal (dati.gov.it has
 # no documented rate limit but it is polite to identify ourselves).
-USER_AGENT = "lakeflow-community-connectors/0.1 (dati_gov_it)"
+USER_AGENT = (
+    "Mozilla/5.0 (compatible; lakeflow-community-connectors/0.1; "
+    "+https://github.com/databrickslabs/lakeflow-community-connectors)"
+)
 
 # HTTP retry policy for transient 5xx / 429 responses.
-RETRIABLE_STATUS_CODES = {429, 500, 502, 503, 504}
+RETRIABLE_STATUS_CODES = {403, 429, 500, 502, 503, 504}
 MAX_RETRIES = 3
 INITIAL_BACKOFF = 1.0  # seconds; doubled after each retry
 
