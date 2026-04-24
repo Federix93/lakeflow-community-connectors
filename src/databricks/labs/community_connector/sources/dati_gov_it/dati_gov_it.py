@@ -411,22 +411,42 @@ class DatiGovItLakeflowConnect(LakeflowConnect, SupportsPartitionedStream):
                 )
                 records.append(_shape_organization(rec))
             except RuntimeError:
+                # organization_show is WAF-blocked on this instance. Fall
+                # back to the organization struct embedded in package_search
+                # results — it carries approval_status, created, description,
+                # image_url, state, title, type, is_organization (but not
+                # email/telephone/num_followers/identifier/site/users, which
+                # only /organization_show exposes).
                 records.append(
                     _shape_organization(
-                        {
-                            "id": slug,
-                            "name": slug,
-                            "title": slug,
-                            "display_name": slug,
-                            "type": "organization",
-                            "state": "active",
-                            "is_organization": True,
-                            "package_count": orgs_facet.get(slug),
-                            "extras": [],
-                        }
+                        self._fetch_embedded_org(slug, orgs_facet.get(slug))
                     )
                 )
         return iter(records), {}
+
+    def _fetch_embedded_org(self, slug: str, package_count: int | None) -> dict:
+        try:
+            result = self._client.get(
+                "package_search",
+                params={"q": f"organization:{slug}", "rows": 1, "facet": False},
+            )
+            pkgs = (result or {}).get("results") or []
+            embedded = (pkgs[0].get("organization") if pkgs else None) or {}
+        except RuntimeError:
+            embedded = {}
+
+        shaped = dict(embedded)
+        # Fill in non-nullable id with the slug if we couldn't get the real UUID.
+        shaped.setdefault("id", slug)
+        shaped.setdefault("name", slug)
+        shaped.setdefault("title", slug)
+        shaped.setdefault("display_name", shaped.get("title") or slug)
+        shaped.setdefault("type", "organization")
+        shaped.setdefault("state", "active")
+        shaped.setdefault("is_organization", True)
+        shaped["package_count"] = package_count
+        shaped["extras"] = []
+        return shaped
 
     def _read_tags(
         self, table_options: dict[str, str]
@@ -495,31 +515,41 @@ class DatiGovItLakeflowConnect(LakeflowConnect, SupportsPartitionedStream):
                 )
                 records.append(_shape_group(rec))
             except RuntimeError:
-                # group_show blocked / transient — emit a minimal row so the
-                # slug is still represented. Use the slug as id since id is
-                # non-nullable and the real UUID is inaccessible here.
+                # group_show is WAF-blocked on this instance. Fall back to
+                # the group struct embedded in package_search results — it
+                # carries description, display_name, image_display_url,
+                # title (but not created/num_followers/approval_status/type,
+                # which only /group_show exposes).
                 records.append(
                     _shape_group(
-                        {
-                            "id": slug,
-                            "name": slug,
-                            "title": slug,
-                            "display_name": slug,
-                            "description": None,
-                            "image_url": None,
-                            "image_display_url": None,
-                            "type": "group",
-                            "state": "active",
-                            "approval_status": None,
-                            "created": None,
-                            "is_organization": False,
-                            "num_followers": None,
-                            "package_count": groups_facet.get(slug),
-                            "extras": [],
-                        }
+                        self._fetch_embedded_group(slug, groups_facet.get(slug))
                     )
                 )
         return iter(records), {}
+
+    def _fetch_embedded_group(self, slug: str, package_count: int | None) -> dict:
+        try:
+            result = self._client.get(
+                "package_search",
+                params={"q": f"groups:{slug}", "rows": 1, "facet": False},
+            )
+            pkgs = (result or {}).get("results") or []
+            groups = (pkgs[0].get("groups") if pkgs else None) or []
+            embedded = next((g for g in groups if g.get("name") == slug), {})
+        except RuntimeError:
+            embedded = {}
+
+        shaped = dict(embedded)
+        shaped.setdefault("id", slug)
+        shaped.setdefault("name", slug)
+        shaped.setdefault("title", slug)
+        shaped.setdefault("display_name", shaped.get("title") or slug)
+        shaped.setdefault("type", "group")
+        shaped.setdefault("state", "active")
+        shaped.setdefault("is_organization", False)
+        shaped["package_count"] = package_count
+        shaped["extras"] = []
+        return shaped
 
     # ------------------------------------------------------------------
     # Packages / resources — sequential (fallback) window reader
