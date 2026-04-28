@@ -1,0 +1,67 @@
+# Immobiliare.it Insights — Market Explorer Community Connector Spec
+# Connection parameters and external options allowlist for the
+# ws-osservatorio-public-api (Market Explorer) service.
+
+# ============================================================================
+# Display Name
+# ============================================================================
+display_name: Immobiliare.it Insights (Market Explorer)
+
+# ============================================================================
+# Connection Parameters
+# Provided when creating the Unity Catalog connection.
+#
+# Auth: OAuth2 Resource Owner Password Grant.
+#   POST {base_url}/oauth/token
+#   Authorization: Basic Base64(client_id:client_secret)
+#   Body: grant_type=password&username=<u>&password=<p>
+# Tokens TTL ~14400s; cache and reuse — repeated re-auth can trigger an IP ban.
+# ============================================================================
+connection:
+  parameters:
+    - name: base_url
+      type: string
+      required: false
+      description: >
+        Base URL for the Market Explorer service. Use the sandbox while developing
+        (https://ws-osservatorio-dev.realitycs.it) and switch to production
+        (https://ws-osservatorio.realitycs.it) once your account is provisioned.
+        Defaults to the sandbox URL if not specified.
+
+    - name: client_id
+      type: string
+      required: true
+      description: >
+        OAuth2 client identifier issued by Immobiliare.it. Used as the username half
+        of the HTTP Basic header on the /oauth/token request.
+
+    - name: client_secret
+      type: string
+      required: true
+      secret: true
+      description: >
+        OAuth2 client secret issued by Immobiliare.it. Used as the password half
+        of the HTTP Basic header on the /oauth/token request.
+
+    - name: username
+      type: string
+      required: true
+      description: >
+        End-user account username, sent in the form-encoded body of the
+        /oauth/token request alongside grant_type=password.
+
+    - name: password
+      type: string
+      required: true
+      secret: true
+      description: >
+        End-user account password, sent in the form-encoded body of the
+        /oauth/token request alongside grant_type=password.
+
+# ============================================================================
+# External Options Allowlist
+# Table-specific options that the UC connection is allowed to pass through.
+# Will be populated by the connector-spec-generator subagent in Step 5 once
+# the implementation defines the complete table_configuration surface.
+# ============================================================================
+external_options_allowlist: ""
