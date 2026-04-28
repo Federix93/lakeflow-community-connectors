@@ -64,4 +64,4 @@ connection:
 # Will be populated by the connector-spec-generator subagent in Step 5 once
 # the implementation defines the complete table_configuration surface.
 # ============================================================================
-external_options_allowlist: ""
+external_options_allowlist: "cadastral_typology,contract,max_records_per_batch,nation,start_year_month,typology,window,zone_filter,zone_level"
