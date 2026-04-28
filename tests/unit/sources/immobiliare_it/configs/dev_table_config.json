@@ -49,7 +49,54 @@
     "nation": "IT",
     "max_records_per_batch": "50"
   },
+  "price": {
+    "zone_level": "com",
+    "zone_filter": "100005",
+    "window": "1M",
+    "contract": "1",
+    "typology": "4",
+    "nation": "IT",
+    "max_records_per_batch": "50"
+  },
+  "ads": {
+    "zone_level": "com",
+    "zone_filter": "100005",
+    "window": "1M",
+    "contract": "1",
+    "typology": "4",
+    "nation": "IT",
+    "max_records_per_batch": "50"
+  },
+  "search_data": {
+    "zone_level": "com",
+    "zone_filter": "100005",
+    "window": "1M",
+    "contract": "1",
+    "typology": "4",
+    "nation": "IT",
+    "max_records_per_batch": "50"
+  },
+  "sales_price": {
+    "zone_level": "pro",
+    "zone_filter": "28",
+    "window": "1M",
+    "contract": "1",
+    "cadastral_typology": "A2",
+    "nation": "IT",
+    "max_records_per_batch": "50"
+  },
+  "sales_volume": {
+    "zone_level": "pro",
+    "zone_filter": "28",
+    "window": "1M",
+    "contract": "1",
+    "cadastral_typology": "A2",
+    "nation": "IT",
+    "max_records_per_batch": "50"
+  },
   "regions": {},
   "provinces": {},
-  "municipalities": {}
+  "municipalities": {},
+  "macro_zones": {},
+  "micro_zones": {}
 }
