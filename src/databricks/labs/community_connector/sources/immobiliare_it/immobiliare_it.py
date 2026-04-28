@@ -49,6 +49,7 @@ from databricks.labs.community_connector.sources.immobiliare_it.immobiliare_it_a
 )
 from databricks.labs.community_connector.sources.immobiliare_it.immobiliare_it_schemas import (
     ADS_HISTORY_TABLE,
+    ADS_TABLE,
     ALL_CONTRACTS_LISTING,
     ALL_CONTRACTS_SALES,
     ALLOWED_WINDOWS,
@@ -65,17 +66,25 @@ from databricks.labs.community_connector.sources.immobiliare_it.immobiliare_it_s
     HISTORY_ENDPOINTS,
     INITIAL_BACKOFF,
     LISTING_HISTORY_TABLES,
+    LISTING_PIT_TABLES,
     MAX_BACKOFF,
     MAX_RETRIES,
     MUNICIPALITIES_TABLE,
+    PIT_ENDPOINTS,
+    POINT_IN_TIME_TABLES,
     PRICE_HISTORY_TABLE,
+    PRICE_TABLE,
     PROVINCES_TABLE,
     REGIONS_TABLE,
     RETRIABLE_STATUS_CODES,
     SALES_HISTORY_TABLES,
+    SALES_PIT_TABLES,
     SALES_PRICE_HISTORY_TABLE,
+    SALES_PRICE_TABLE,
     SALES_VOLUME_HISTORY_TABLE,
+    SALES_VOLUME_TABLE,
     SEARCH_DATA_HISTORY_TABLE,
+    SEARCH_DATA_TABLE,
     SNAPSHOT_TABLES,
     SNAPSHOT_TY_ZONE,
     SUPPORTED_TABLES,
@@ -243,16 +252,28 @@ class ImmobiliareItLakeflowConnect(LakeflowConnect, SupportsPartitionedStream):
     ) -> tuple[Iterator[dict], dict]:
         """Single-driver read path.
 
-        For snapshot tables this fetches the full geo list. For CDC tables
-        this is the fallback (used when partitioning is disabled or when
-        Spark calls through ``simpleStreamReader``) — it sequentially walks
-        the zone × month cartesian product for a single month window.
+        For geo-taxonomy tables this fetches the full list endpoint
+        (``regions``, ``provinces``, ``municipalities``, ``macro_zones``,
+        ``micro_zones``).
+
+        For CDC tables this is the fallback (used when partitioning is
+        disabled or when Spark calls through ``simpleStreamReader``) — it
+        sequentially walks the zone × month cartesian product for a single
+        month window.
+
+        For point-in-time tables this fans out the same zone × contract ×
+        typology cartesian product as the partitioned path, but pinned to
+        the single latest available ``(year, month)``. The returned offset
+        is the latest cursor — re-running advances the cursor only when
+        the source publishes a new period.
         """
         self._validate_table(table_name)
         table_options = table_options or {}
 
         if table_name in SNAPSHOT_TABLES:
             return self._read_snapshot(table_name)
+        if table_name in POINT_IN_TIME_TABLES:
+            return self._read_pit_sequential(table_name, table_options)
         return self._read_history_sequential(
             table_name, start_offset or {}, table_options
         )
@@ -262,13 +283,17 @@ class ImmobiliareItLakeflowConnect(LakeflowConnect, SupportsPartitionedStream):
     # ------------------------------------------------------------------
 
     def is_partitioned(self, table_name: str) -> bool:
-        """Only history tables benefit from zone-level fan-out.
+        """Tables with zone × contract × typology fan-out partition; geo lists don't.
 
-        Snapshot tables are a single small list endpoint each (regions: 20,
-        provinces: 110, municipalities: ~7900) and don't benefit from
+        History tables (``*_history``) and point-in-time tables (``price``,
+        ``ads``, ``search_data``, ``sales_price``, ``sales_volume``) all share
+        the same zone-fanned-out POST shape and benefit from executor
+        parallelism. Geo-taxonomy snapshot tables are a single small list
+        endpoint each (regions: 20, provinces: 110, municipalities: ~7,900,
+        macro_zones / micro_zones: comparable scale) and don't benefit from
         partitioning — they fall back to ``simpleStreamReader``.
         """
-        return table_name in CDC_TABLES
+        return table_name in CDC_TABLES or table_name in POINT_IN_TIME_TABLES
 
     def latest_offset(
         self,
@@ -278,17 +303,26 @@ class ImmobiliareItLakeflowConnect(LakeflowConnect, SupportsPartitionedStream):
     ) -> dict:
         """Return the current high-water mark for the streaming cursor.
 
-        The watermark is the latest available ``(year, month)`` for the
-        configured window, discovered via the temporal taxonomy endpoint.
-        We cache the result on ``self`` so successive micro-batches in the
-        same driver use a stable ceiling — that's important so the stream
-        terminates at end-of-data rather than chasing a moving target.
+        For history (CDC) tables the watermark is the latest available
+        ``(year, month)`` for the configured window, discovered via the
+        temporal taxonomy endpoint. We cache the result on ``self`` so
+        successive micro-batches in the same driver use a stable ceiling —
+        that's important so the stream terminates at end-of-data rather
+        than chasing a moving target.
+
+        For point-in-time tables we *also* return the latest period so the
+        emitted partitions are pinned to a stable target month. PIT
+        ingestion type is ``snapshot`` — semantically a re-read each run —
+        so the offset is non-checkpointable; we keep it identical across
+        calls within a driver and let the framework treat the run as a
+        single deterministic batch. ``get_partitions`` ignores the cursor
+        for PIT tables.
         """
         self._validate_table(table_name)
-        if table_name not in CDC_TABLES:
-            return {}
-        latest = self._get_latest_year_month()
-        return {"cursor": latest}
+        if table_name in CDC_TABLES or table_name in POINT_IN_TIME_TABLES:
+            latest = self._get_latest_year_month()
+            return {"cursor": latest}
+        return {}
 
     def get_partitions(
         self,
@@ -317,21 +351,29 @@ class ImmobiliareItLakeflowConnect(LakeflowConnect, SupportsPartitionedStream):
             # ignores ``is_partitioned`` and asks for partitions anyway.
             return [{"mode": "snapshot"}]
 
-        start_ym = self._extract_cursor(start_offset)
-        end_ym = self._extract_cursor(end_offset)
+        if table_name in POINT_IN_TIME_TABLES:
+            # PIT semantics: every micro-batch re-reads the latest available
+            # ``(year, month)``. We deliberately ignore ``start_offset`` and
+            # ``end_offset`` — there is no incremental cursor for snapshot
+            # tables. Each call returns the same partition set (same zones,
+            # same target month) until the temporal taxonomy advances.
+            months = [self._get_latest_year_month()]
+        else:
+            start_ym = self._extract_cursor(start_offset)
+            end_ym = self._extract_cursor(end_offset)
 
-        # Resolve floor / ceiling for batch mode.
-        if start_ym is None:
-            start_ym = self._configured_start_year_month(table_options) - 1
-            # Subtract 1 so the first month is included (range is exclusive
-            # on start_ym).
-        if end_ym is None:
-            end_ym = self._get_latest_year_month()
+            # Resolve floor / ceiling for batch mode.
+            if start_ym is None:
+                start_ym = self._configured_start_year_month(table_options) - 1
+                # Subtract 1 so the first month is included (range is exclusive
+                # on start_ym).
+            if end_ym is None:
+                end_ym = self._get_latest_year_month()
 
-        if start_ym >= end_ym:
-            return []
+            if start_ym >= end_ym:
+                return []
 
-        months = _enumerate_year_months(start_ym, end_ym)
+            months = _enumerate_year_months(start_ym, end_ym)
 
         # Resolve fan-out filters.
         zone_level = (
@@ -348,13 +390,13 @@ class ImmobiliareItLakeflowConnect(LakeflowConnect, SupportsPartitionedStream):
         if not zones:
             return []
 
+        is_sales = (
+            table_name in SALES_HISTORY_TABLES or table_name in SALES_PIT_TABLES
+        )
+
         contracts = _split_csv_int(
             table_options.get("contract")
-            or (
-                ALL_CONTRACTS_SALES
-                if table_name in SALES_HISTORY_TABLES
-                else ALL_CONTRACTS_LISTING
-            )
+            or (ALL_CONTRACTS_SALES if is_sales else ALL_CONTRACTS_LISTING)
         )
         nation = (table_options.get("nation") or DEFAULT_NATION).strip().upper()
         window = (table_options.get("window") or DEFAULT_WINDOW).strip().upper()
@@ -363,7 +405,7 @@ class ImmobiliareItLakeflowConnect(LakeflowConnect, SupportsPartitionedStream):
                 f"window={window!r} not allowed; expected one of {ALLOWED_WINDOWS}"
             )
 
-        if table_name in SALES_HISTORY_TABLES:
+        if is_sales:
             cadastral = _split_csv_str(
                 table_options.get("cadastral_typology")
                 or DEFAULT_CADASTRAL_TYPOLOGIES
@@ -432,8 +474,14 @@ class ImmobiliareItLakeflowConnect(LakeflowConnect, SupportsPartitionedStream):
         )
         client = _ImmobiliareClient(base_url, tokens)
 
-        body = _build_history_request_body(table_name, partition)
-        endpoint = HISTORY_ENDPOINTS[table_name]
+        is_pit = table_name in POINT_IN_TIME_TABLES
+        if is_pit:
+            body = _build_pit_request_body(table_name, partition)
+            endpoint = PIT_ENDPOINTS[table_name]
+        else:
+            body = _build_history_request_body(table_name, partition)
+            endpoint = HISTORY_ENDPOINTS[table_name]
+
         try:
             response = client.post(endpoint, body)
         except RuntimeError as exc:
@@ -446,6 +494,8 @@ class ImmobiliareItLakeflowConnect(LakeflowConnect, SupportsPartitionedStream):
             raise
 
         items = (response or {}).get("items") or []
+        if is_pit:
+            return iter(_shape_pit_response(table_name, partition, items))
         return iter(_shape_history_response(table_name, partition, items))
 
     # ------------------------------------------------------------------
@@ -470,6 +520,40 @@ class ImmobiliareItLakeflowConnect(LakeflowConnect, SupportsPartitionedStream):
     # ------------------------------------------------------------------
     # Sequential history reader (used by read_table fallback)
     # ------------------------------------------------------------------
+
+    def _read_pit_sequential(
+        self,
+        table_name: str,
+        table_options: dict[str, str],
+    ) -> tuple[Iterator[dict], dict]:
+        """Sequential single-driver fan-out for point-in-time tables.
+
+        Snapshot semantics — every call refetches the latest period. The
+        emitted offset advances only when ``/api/taxonomies/temporal``
+        reports a new period; otherwise repeated calls return identical
+        rows and an unchanged cursor (which is how the framework knows to
+        stop micro-batching the same snapshot).
+        """
+        latest_ym = self._get_latest_year_month()
+        partitions = self.get_partitions(
+            table_name,
+            table_options,
+            start_offset=None,
+            end_offset=None,
+        )
+
+        max_records = _positive_int(table_options.get("max_records_per_batch"))
+        records: list[dict] = []
+        for partition in partitions:
+            for record in self.read_partition(table_name, partition, table_options):
+                records.append(record)
+                if max_records and len(records) >= max_records:
+                    # Bounded-batch ceiling. Don't advance the cursor — the
+                    # next call must reload the same period to backfill the
+                    # remaining zones. PIT rows are upsert-keyed so already-
+                    # emitted rows will overwrite cleanly.
+                    return iter(records), {"cursor": latest_ym - 1}
+        return iter(records), {"cursor": latest_ym}
 
     def _read_history_sequential(
         self,
@@ -764,6 +848,39 @@ def _build_history_request_body(table_name: str, partition: dict) -> dict[str, A
     return body
 
 
+def _build_pit_request_body(table_name: str, partition: dict) -> dict[str, Any]:
+    """Project a partition descriptor onto the JSON body of a PIT POST.
+
+    The wire shape is identical to the history endpoints — same required
+    keys (``ty_zone``, ``id_zone``, ``window``, ``contract``, ``year``,
+    ``month``) and the same optional ``typology`` (listing-side) /
+    ``cadastral_typology`` (sales) filter.
+
+    We additionally pass ``success_if_empty=true`` so zones with no data
+    return ``200`` with an empty ``items`` array instead of ``404``/``422``.
+    The api_doc explicitly documents this flag for PIT endpoints; without
+    it the long-tail 404s would slow down every micro-batch via retries.
+    """
+    body: dict[str, Any] = {
+        "ty_zone": partition["ty_zone"],
+        "id_zone": str(partition["id_zone"]),
+        "window": partition["window"],
+        "contract": int(partition["contract"]),
+        "year": int(partition["year"]),
+        "month": int(partition["month"]),
+        "nation": partition.get("nation") or DEFAULT_NATION,
+        "success_if_empty": True,
+    }
+    if table_name in LISTING_PIT_TABLES:
+        if partition.get("typology") is not None:
+            body["typology"] = int(partition["typology"])
+    elif table_name in SALES_PIT_TABLES:
+        cadastral = partition.get("cadastral_typology")
+        if cadastral:
+            body["cadastral_typology"] = str(cadastral)
+    return body
+
+
 def _shape_history_response(
     table_name: str, partition: dict, items: list[dict]
 ) -> Iterable[dict]:
@@ -1024,6 +1141,346 @@ def _shape_sales_volume(partition: dict, item: dict) -> Iterable[dict]:
         yield out
 
 
+# ---------------------------------------------------------------------------
+# Point-in-time response shapers
+#
+# Every PIT response is a single ``items`` array (typically one element)
+# with top-level scalar metrics wrapped in ``{value, delta:{value,window},
+# ranking:{of,position}}`` plus inner breakdowns (maintenance_status,
+# rooms, price_typologies, etc.). Each shaper flattens onto the
+# ``(series_type, series_key)`` axis used by the corresponding schema:
+#
+# - ``series_type="scalar"`` rows hold one top-level metric per row, with
+#   ``series_key`` set to the metric name (``"price_avg"``, ``"discount"``,
+#   ``"price_sqm_elasticity"``, ...).
+# - Breakdown rows use the breakdown name (e.g. ``"maintenance_status"``,
+#   ``"rooms"``, ``"price_typologies"``, ``"price_cadastral_typologies"``,
+#   ``"cadastral_typologies"``, ``"sales_surface_class"``) as ``series_type``
+#   and the inner key as ``series_key``.
+# - The ``res`` struct in search_data PIT becomes a single
+#   ``series_type="res"`` row with all ``pc_*`` columns populated.
+# ---------------------------------------------------------------------------
+
+
+def _shape_pit_response(
+    table_name: str, partition: dict, items: list[dict]
+) -> Iterable[dict]:
+    """Dispatch a PIT response to the per-table shaper."""
+    for item in items or []:
+        if not isinstance(item, dict):
+            continue
+        if table_name == PRICE_TABLE:
+            yield from _shape_price_pit(partition, item)
+        elif table_name == ADS_TABLE:
+            yield from _shape_ads_pit(partition, item)
+        elif table_name == SEARCH_DATA_TABLE:
+            yield from _shape_search_data_pit(partition, item)
+        elif table_name == SALES_PRICE_TABLE:
+            yield from _shape_sales_price_pit(partition, item)
+        elif table_name == SALES_VOLUME_TABLE:
+            yield from _shape_sales_volume_pit(partition, item)
+
+
+def _base_pit_row(partition: dict) -> dict[str, Any]:
+    """Common scalar columns derived from the partition descriptor for PIT rows."""
+    return {
+        "ty_zone": partition["ty_zone"],
+        "id_zone": str(partition["id_zone"]),
+        "nation": partition.get("nation") or DEFAULT_NATION,
+        "contract": int(partition["contract"]),
+        "window": partition["window"],
+        "year": int(partition["year"]),
+        "month": int(partition["month"]),
+    }
+
+
+# Top-level scalar metrics that price/ads PIT may return. Listed
+# explicitly so we have a stable, documented column inventory and so a
+# new metric in the response (which the API has done historically) lands
+# as an extra row rather than silently disappearing.
+_PRICE_LIKE_PIT_SCALARS = (
+    "discount",
+    "price_avg",
+    "price_min",
+    "price_max",
+    "price_sqm_avg",
+    "price_sqm_min",
+    "price_sqm_max",
+    "price_sqm_elasticity",
+    "price_sqm_variability",
+)
+
+
+def _emit_pit_scalar_row(
+    base: dict[str, Any],
+    metric_name: str,
+    metric: Any,
+) -> Iterable[dict]:
+    """Emit one ``series_type='scalar'`` row from a ``{value, delta, ranking}`` envelope.
+
+    Tolerates missing sub-objects (a fresh-data zone may have no prior
+    period to delta against, or no peers to rank within) by leaving the
+    affected columns null.
+    """
+    if not isinstance(metric, dict):
+        return
+    delta = metric.get("delta") if isinstance(metric.get("delta"), dict) else {}
+    ranking = (
+        metric.get("ranking") if isinstance(metric.get("ranking"), dict) else {}
+    )
+    out = dict(base)
+    out["series_type"] = "scalar"
+    out["series_key"] = metric_name
+    out["value"] = _to_float(metric.get("value"))
+    out["delta_value"] = _to_float(delta.get("value"))
+    out["delta_window"] = _to_str(delta.get("window"))
+    out["ranking_of"] = _to_int(ranking.get("of"))
+    out["ranking_position"] = _to_int(ranking.get("position"))
+    yield out
+
+
+def _emit_pit_percentile_row(
+    base: dict[str, Any],
+    series_type: str,
+    series_key: str,
+    bucket: dict | None,
+) -> Iterable[dict]:
+    """Emit one percentile-breakdown row from a ``{price_Xpc}`` bucket.
+
+    Used by maintenance_status / rooms / price_typologies for price/ads
+    and by price_cadastral_typologies for sales_price.
+    """
+    if not isinstance(bucket, dict):
+        return
+    out = dict(base)
+    out["series_type"] = series_type
+    out["series_key"] = series_key
+    out["price_10pc"] = _to_float(bucket.get("price_10pc"))
+    out["price_20pc"] = _to_float(bucket.get("price_20pc"))
+    out["price_50pc"] = _to_float(bucket.get("price_50pc"))
+    out["price_80pc"] = _to_float(bucket.get("price_80pc"))
+    out["price_90pc"] = _to_float(bucket.get("price_90pc"))
+    yield out
+
+
+def _shape_price_pit(partition: dict, item: dict) -> Iterable[dict]:
+    """price PIT shaper.
+
+    Produces one row per:
+    - top-level scalar metric (``discount``, ``price_avg``, ``price_min``,
+      ``price_max``, ``price_sqm_avg``, ``price_sqm_min``, ``price_sqm_max``,
+      ``price_sqm_elasticity``, ``price_sqm_variability``) — populates
+      ``value``, ``delta_value``, ``delta_window``, ``ranking_of``,
+      ``ranking_position``.
+    - ``maintenance_status`` bucket keyed by status code ("1".."4") — populates
+      ``price_10pc``..``price_90pc``.
+    - ``rooms`` bucket keyed by room count ("1".."5","m5") — populates
+      ``price_10pc``..``price_90pc``.
+    - ``price_typologies`` bucket keyed by typology code (e.g. "4","5","7") —
+      populates ``price_10pc``..``price_90pc``.
+
+    The ``typology`` request param is replayed onto every row so the user
+    can discriminate fan-out shards even when the response itself doesn't
+    echo the filter back.
+    """
+    typology = partition.get("typology")
+    base = _base_pit_row(partition)
+    base["typology"] = int(typology) if typology is not None else None
+
+    for metric_name in _PRICE_LIKE_PIT_SCALARS:
+        yield from _emit_pit_scalar_row(base, metric_name, item.get(metric_name))
+
+    for breakdown_key in ("maintenance_status", "rooms", "price_typologies"):
+        breakdown = item.get(breakdown_key)
+        if not isinstance(breakdown, dict):
+            continue
+        for inner_key, bucket in breakdown.items():
+            yield from _emit_pit_percentile_row(
+                base, breakdown_key, str(inner_key), bucket
+            )
+
+
+def _shape_ads_pit(partition: dict, item: dict) -> Iterable[dict]:
+    """ads PIT shaper.
+
+    Identical layout to ``price`` PIT (per the api_doc). The ads endpoint
+    tracks listings stock with the same scalar metrics + percentile
+    breakdowns as the price endpoint.
+    """
+    yield from _shape_price_pit(partition, item)
+
+
+# Top-level scalar metrics for search_data PIT.
+_SEARCH_DATA_PIT_SCALARS = (
+    "contribution",
+    "contribution_views",
+    "conversion_rate",
+    "leads_avg",
+    "min_surface_avg",
+    "price_sqm_search_avg",
+)
+
+
+def _shape_search_data_pit(partition: dict, item: dict) -> Iterable[dict]:
+    """search_data PIT shaper.
+
+    Heterogeneous response. Produces one row per:
+    - top-level scalar metric (``contribution``, ``contribution_views``,
+      ``conversion_rate``, ``leads_avg``, ``min_surface_avg``,
+      ``price_sqm_search_avg``) — populates value/delta/ranking.
+    - ``maintenance_status`` array entry keyed by ``status_id`` — populates
+      ``qt_raw_perc``.
+    - ``typologies`` array entry keyed by ``typology_id`` — populates
+      ``qt_raw_perc``.
+    - ``pc_rooms`` map entry keyed by room count — populates ``pc_raw`` and
+      ``qt_raw``.
+    - ``res`` struct — emits a single ``series_type="res"`` row with
+      ``series_key="_"`` and all ``pc_*`` attribute percentages populated.
+
+    Note: ``maintenance_status`` and ``typologies`` are *arrays* in the
+    PIT response (not dict-of-objects as in the history endpoint).
+    """
+    typology = partition.get("typology")
+    base = _base_pit_row(partition)
+    base["typology"] = int(typology) if typology is not None else None
+
+    for metric_name in _SEARCH_DATA_PIT_SCALARS:
+        yield from _emit_pit_scalar_row(base, metric_name, item.get(metric_name))
+
+    # maintenance_status: array of {status_id, qt_raw_perc}
+    for entry in item.get("maintenance_status") or []:
+        if not isinstance(entry, dict):
+            continue
+        out = dict(base)
+        out["series_type"] = "maintenance_status"
+        out["series_key"] = _to_str(entry.get("status_id")) or ""
+        out["qt_raw_perc"] = _to_float(entry.get("qt_raw_perc"))
+        yield out
+
+    # typologies: array of {typology_id, qt_raw_perc}
+    for entry in item.get("typologies") or []:
+        if not isinstance(entry, dict):
+            continue
+        out = dict(base)
+        out["series_type"] = "typologies"
+        out["series_key"] = _to_str(entry.get("typology_id")) or ""
+        out["qt_raw_perc"] = _to_float(entry.get("qt_raw_perc"))
+        yield out
+
+    # pc_rooms: object keyed by room count → {pc_raw, qt_raw}
+    pc_rooms = item.get("pc_rooms")
+    if isinstance(pc_rooms, dict):
+        for room_key, stats in pc_rooms.items():
+            if not isinstance(stats, dict):
+                continue
+            out = dict(base)
+            out["series_type"] = "pc_rooms"
+            out["series_key"] = str(room_key)
+            out["pc_raw"] = _to_float(stats.get("pc_raw"))
+            out["qt_raw"] = _to_float(stats.get("qt_raw"))
+            yield out
+
+    # res: single struct of pc_* attribute percentages → one row
+    res = item.get("res")
+    if isinstance(res, dict):
+        out = dict(base)
+        out["series_type"] = "res"
+        out["series_key"] = "_"
+        out["pc_1floor"] = _to_float(res.get("pc_1floor"))
+        out["pc_1typology"] = _to_float(res.get("pc_1typology"))
+        out["pc_garage"] = _to_float(res.get("pc_garage"))
+        out["pc_garden"] = _to_float(res.get("pc_garden"))
+        out["pc_minrooms"] = _to_float(res.get("pc_minrooms"))
+        out["pc_status"] = _to_float(res.get("pc_status"))
+        out["pc_terrace"] = _to_float(res.get("pc_terrace"))
+        yield out
+
+
+# Top-level scalar metrics for sales_price PIT.
+_SALES_PRICE_PIT_SCALARS = (
+    "compravendite_price_sqm_avg",
+    "compravendite_price_sqm_max",
+    "compravendite_price_sqm_min",
+    "compravendite_sales_price_avg",
+)
+
+
+def _shape_sales_price_pit(partition: dict, item: dict) -> Iterable[dict]:
+    """sales_price PIT shaper.
+
+    Produces one row per:
+    - top-level scalar metric (``compravendite_price_sqm_avg``,
+      ``compravendite_price_sqm_max``, ``compravendite_price_sqm_min``,
+      ``compravendite_sales_price_avg``) — populates value/delta/ranking.
+    - ``price_cadastral_typologies`` array entry keyed by the inner
+      ``cadastral_typology`` value (A1..A11) — populates
+      ``price_10pc``..``price_90pc``.
+
+    The ``cadastral_typology`` request param (used as fan-out shard key)
+    is replayed onto every row.
+    """
+    cadastral = partition.get("cadastral_typology")
+    base = _base_pit_row(partition)
+    base["cadastral_typology"] = str(cadastral) if cadastral else None
+
+    for metric_name in _SALES_PRICE_PIT_SCALARS:
+        yield from _emit_pit_scalar_row(base, metric_name, item.get(metric_name))
+
+    for entry in item.get("price_cadastral_typologies") or []:
+        if not isinstance(entry, dict):
+            continue
+        inner = _to_str(entry.get("cadastral_typology")) or ""
+        yield from _emit_pit_percentile_row(
+            base, "price_cadastral_typologies", inner, entry
+        )
+
+
+# Top-level scalar metrics for sales_volume PIT.
+_SALES_VOLUME_PIT_SCALARS = ("sales", "sales_qtraw", "sales_surface_avg")
+
+
+def _shape_sales_volume_pit(partition: dict, item: dict) -> Iterable[dict]:
+    """sales_volume PIT shaper.
+
+    Produces one row per:
+    - top-level scalar metric (``sales`` — total transaction revenue,
+      ``sales_qtraw`` — normalised transaction count, ``sales_surface_avg``
+      — average surface) — populates value/delta/ranking.
+    - ``cadastral_typologies`` array entry keyed by ``typology_id`` —
+      populates ``qt_raw_perc``.
+    - ``sales_surface_class`` array entry keyed by ``id`` — populates
+      ``qt_raw_perc`` and replays the surface-class id into a separate
+      ``class_surface`` column for downstream joins against the
+      ``class_surface`` taxonomy.
+    """
+    cadastral = partition.get("cadastral_typology")
+    base = _base_pit_row(partition)
+    base["cadastral_typology"] = str(cadastral) if cadastral else None
+
+    for metric_name in _SALES_VOLUME_PIT_SCALARS:
+        yield from _emit_pit_scalar_row(base, metric_name, item.get(metric_name))
+
+    for entry in item.get("cadastral_typologies") or []:
+        if not isinstance(entry, dict):
+            continue
+        out = dict(base)
+        out["series_type"] = "cadastral_typologies"
+        out["series_key"] = _to_str(entry.get("typology_id")) or ""
+        out["qt_raw_perc"] = _to_float(entry.get("qt_raw_perc"))
+        yield out
+
+    for entry in item.get("sales_surface_class") or []:
+        if not isinstance(entry, dict):
+            continue
+        surface_id = _to_str(entry.get("id")) or ""
+        out = dict(base)
+        out["series_type"] = "sales_surface_class"
+        out["series_key"] = surface_id
+        out["qt_raw_perc"] = _to_float(entry.get("qt_raw_perc"))
+        out["class_surface"] = surface_id
+        yield out
+
+
 def _shape_geo_item(item: dict | None) -> dict:
     """Project a geo taxonomy item onto GEO_ZONE_SCHEMA."""
     if not isinstance(item, dict):
@@ -1048,6 +1505,18 @@ def _to_float(value: Any) -> float | None:
         return float(value)
     except (TypeError, ValueError):
         return None
+
+
+def _to_int(value: Any) -> int | None:
+    if value is None:
+        return None
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        try:
+            return int(float(value))
+        except (TypeError, ValueError):
+            return None
 
 
 def _to_str(value: Any) -> str | None:
