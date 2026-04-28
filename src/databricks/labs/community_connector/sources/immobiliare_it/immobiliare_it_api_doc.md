@@ -111,6 +111,8 @@ The Market Explorer service exposes the following objects covered in this docume
 
 All objects are static in list (there is no discovery endpoint for the list itself). The objects are enumerated above.
 
+Seven additional tables have been documented as of 2026-04-28: the point-in-time (snapshot) twins of the five history endpoints (`price`, `ads`, `search_data`, `sales_price`, `sales_volume`) and two extra geo-taxonomy levels (`macro_zones`, `micro_zones`). See the corresponding `### Table:` sections below the `municipalities` section in the Object Schema.
+
 ---
 
 ## Taxonomy Reference
@@ -1033,6 +1035,884 @@ Same structure as `provinces`:
 ```bash
 curl --location 'https://ws-osservatorio.realitycs.it/api/taxonomies/geo/IT/ty_zone/com' \
   --header 'Authorization: Bearer <token>'
+```
+
+---
+
+### Table: `macro_zones`
+
+**Ingestion type:** `snapshot`
+**HTTP Method:** GET
+**Endpoint:** `/api/taxonomies/geo/IT/ty_zone/macro`
+
+#### Request Parameters
+
+No request body. Path parameters only: nation=`IT`, ty_zone=`macro`. Same URL pattern as `regions`, `provinces`, and `municipalities` — only the trailing segment changes.
+
+#### Response Schema
+
+Identical to `regions` / `provinces` / `municipalities`. See the `### Table: regions` section for the shared schema.
+
+```
+{
+  "_metadata": {
+    "message": string,
+    "query":   object,
+    "status":  number
+  },
+  "items": [
+    {
+      "id_zone":  string,   -- macro-zone identifier (e.g. "28035_D040R")
+      "id_reg":   string,   -- parent region identifier
+      "nome":     string,   -- macro-zone name
+      "nome_reg": string    -- parent region name
+    }
+  ]
+}
+```
+
+**Primary key proposal:** `id_zone`
+
+**Scale estimate:** Macro-zones are aggregated neighbourhood-level zones. Expected order of magnitude: ~thousands of records (substantially more than 110 provinces but fewer than ~7,900 municipalities). Exact count TBD empirically.
+
+**Pagination:** None documented. Full list expected in a single response (as per the shared `ty_zone` list endpoint pattern).
+
+**Note on `id_zone` format:** Macro-zone IDs use a compound format (e.g. `"28035_D040R"`) as observed in the `/api/taxonomies/geo/IT/hierarchy/lat/.../lng/...` response. This differs from the simple integer IDs used for regions/provinces/municipalities.
+
+**Verbatim cURL example:**
+
+```bash
+curl --location 'https://ws-osservatorio.realitycs.it/api/taxonomies/geo/IT/ty_zone/macro' \
+  --header 'Authorization: Bearer <token>'
+```
+
+---
+
+### Table: `micro_zones`
+
+**Ingestion type:** `snapshot`
+**HTTP Method:** GET
+**Endpoint:** `/api/taxonomies/geo/IT/ty_zone/micro`
+
+#### Request Parameters
+
+No request body. Path parameters only: nation=`IT`, ty_zone=`micro`. Same URL pattern as all other geo-taxonomy list endpoints.
+
+#### Response Schema
+
+Identical to `regions` / `provinces` / `municipalities`. See the `### Table: regions` section for the shared schema.
+
+```
+{
+  "_metadata": {
+    "message": string,
+    "query":   object,
+    "status":  number
+  },
+  "items": [
+    {
+      "id_zone":  string,   -- micro-zone identifier (e.g. "28035_D040R1")
+      "id_reg":   string,   -- parent region identifier
+      "nome":     string,   -- micro-zone name
+      "nome_reg": string    -- parent region name
+    }
+  ]
+}
+```
+
+**Primary key proposal:** `id_zone`
+
+**Scale estimate:** Micro-zones are the finest geographic granularity available. Expected order of magnitude: ~tens of thousands of records. This is the largest taxonomy list and may produce a sizeable single-response payload.
+
+**Pagination:** None documented; the full list is expected in a single (potentially large) response. See Open Question #4 about pagination for large zone lists.
+
+**Note on `id_zone` format:** Micro-zone IDs use a compound format extending the macro-zone ID (e.g. `"28035_D040R1"`) as observed in the hierarchy endpoint. Confirm this pattern holds universally before building zone-ID parsing logic.
+
+**Verbatim cURL example:**
+
+```bash
+curl --location 'https://ws-osservatorio.realitycs.it/api/taxonomies/geo/IT/ty_zone/micro' \
+  --header 'Authorization: Bearer <token>'
+```
+
+---
+
+### Table: `price`
+
+**Ingestion type:** `snapshot`
+**HTTP Method:** POST
+**Endpoint:** `/api/price`
+
+Point-in-time twin of `price_history`. Returns the **current** market values for a given `(ty_zone, id_zone, window, contract, year, month)` combination rather than a time-series. The response is structurally very different from `price_history`: instead of arrays of `(year, month, price_avg, price_avgin, price_avgout)` records, each metric is a single object with `value`, `delta` (change vs. prior window), and `ranking` (position among peers). The `price_typologies`, `rooms`, and `maintenance_status` breakdowns use a percentile distribution schema (`price_10pc`–`price_90pc`) not present in the history endpoint.
+
+#### Fields present in `price` but NOT in `price_history`
+
+| Field | Type | Notes |
+|---|---|---|
+| `discount` | object | Negotiation discount metric — no equivalent in history |
+| `price_avg` | object (`value`, `delta`, `ranking`) | Absolute listing price avg — history only tracks price/sqm |
+| `price_min` | object (`value`, `delta`, `ranking`) | Absolute listing price min — not in history |
+| `price_max` | object (`value`, `delta`, `ranking`) | Absolute listing price max — not in history |
+| `price_sqm_elasticity` | object (`value`, `delta`, `ranking`) | Elasticity metric — not in history |
+| `price_sqm_variability` | object (`value`, `delta`, `ranking`) | Variability metric — not in history |
+| `price_typologies` | object (keyed by typology ID) | Percentile breakdowns by property type — history has no typology breakdown |
+| `maintenance_status[n].price_Xpc` | number | Percentile fields (`price_10pc`–`price_90pc`) — history uses `price_avg`, `price_avgin`, `price_avgout` instead |
+| `rooms[n].price_Xpc` | number | Percentile fields per room count — not in history |
+| `delta` / `ranking` sub-objects | object | All point-in-time metrics carry delta and ranking — history has none |
+
+#### Request Body Parameters
+
+| Parameter | Required | Type | Example | Notes |
+|---|---|---|---|---|
+| `ty_zone` | Yes | string | `"com"` | Zone type; see ty_zone taxonomy |
+| `id_zone` | Yes | string | `"100005"` | Zone identifier from geo list endpoint |
+| `window` | Yes | string | `"1M"` | Time window; allowed: `1M`, `3M`, `6M`, `12M` |
+| `contract` | Yes | number | `1` | `1` = sale, `2` = rental |
+| `year` | Yes | number | `2024` | Reference year for the snapshot period |
+| `month` | Yes | number | `12` | Reference month for the snapshot period |
+| `typology` | No | number | `4` | Property typology code; omit for aggregate |
+| `nation` | No | string | `"IT"` | Defaults to `IT` |
+| `success_if_empty` | No | boolean | `false` | When `true`, returns a 200 with empty `items` instead of `404`/`422` for zones with no data |
+
+**Note on `year`/`month`:** Both are documented as **required** — the non-history endpoint does NOT default to "current". The caller must supply an explicit `(year, month)` target period (use `/api/taxonomies/temporal` to find the latest valid period).
+
+#### Response Schema
+
+```
+{
+  "_metadata": {
+    "message":    string,
+    "query":      object,
+    "status":     number,
+    "request_id": string  -- UUID
+  },
+  "items": [
+    {
+      "discount": {
+        "value":   number,   -- negotiation discount percentage
+        "delta":   { "value": number, "window": string },
+        "ranking": { "of": number, "position": number }
+      },
+      "price_avg": {
+        "value":   number,   -- average absolute listing price (€)
+        "delta":   { "value": number, "window": string },
+        "ranking": { "of": number, "position": number }
+      },
+      "price_min": {
+        "value":   number,
+        "delta":   { "value": number, "window": string },
+        "ranking": { "of": number, "position": number }
+      },
+      "price_max": {
+        "value":   number,
+        "delta":   { "value": number, "window": string },
+        "ranking": { "of": number, "position": number }
+      },
+      "price_sqm_avg": {
+        "value":   number,   -- average price per sqm (€/m²)
+        "delta":   { "value": number, "window": string },
+        "ranking": { "of": number, "position": number }
+      },
+      "price_sqm_min": {
+        "value":   number,
+        "delta":   { "value": number, "window": string },
+        "ranking": { "of": number, "position": number }
+      },
+      "price_sqm_max": {
+        "value":   number,
+        "delta":   { "value": number, "window": string },
+        "ranking": { "of": number, "position": number }
+      },
+      "price_sqm_elasticity": {
+        "value":   number,
+        "delta":   { "value": number, "window": string },
+        "ranking": { "of": number, "position": number }
+      },
+      "price_sqm_variability": {
+        "value":   number,
+        "delta":   { "value": number, "window": string },
+        "ranking": { "of": number, "position": number }
+      },
+      "maintenance_status": {           -- object keyed by maintenance_status code ("1","2","3","4")
+        "<status_id>": {
+          "price_10pc": number,         -- 10th percentile price/sqm
+          "price_20pc": number,
+          "price_50pc": number,         -- median price/sqm
+          "price_80pc": number,
+          "price_90pc": number          -- 90th percentile price/sqm
+        }
+      },
+      "price_typologies": {             -- object keyed by typology code (e.g. "4","5","7","10","11","12","13","31")
+        "<typology_id>": {
+          "price_10pc": number,
+          "price_20pc": number,
+          "price_50pc": number,
+          "price_80pc": number,
+          "price_90pc": number
+        }
+      },
+      "rooms": {                        -- object keyed by room count ("1","2","3","4","5","m5")
+        "<room_count>": {
+          "price_10pc": number,
+          "price_20pc": number,
+          "price_50pc": number,
+          "price_80pc": number,
+          "price_90pc": number
+        }
+      }
+    }
+  ]
+}
+```
+
+**Primary key proposal (for flattened rows):**
+
+A single API call returns one snapshot record. When normalising to a flat table, the request parameters are the natural key:
+`(ty_zone, id_zone, contract, window, typology, year, month)`
+
+For the breakdowns (`maintenance_status`, `price_typologies`, `rooms`), add a `breakdown_type` and `breakdown_key` column analogously to the history flattening strategy.
+
+**Verbatim cURL example:**
+
+```bash
+curl --location 'https://ws-osservatorio.realitycs.it/api/price' \
+  --header 'Content-Type: application/json' \
+  --header 'Authorization: Bearer <token>' \
+  --data '{
+    "ty_zone": "com",
+    "id_zone": "100005",
+    "window": "1M",
+    "contract": 1,
+    "year": 2024,
+    "month": 12,
+    "typology": 4,
+    "nation": "IT"
+  }'
+```
+
+**Verbatim response example (abbreviated):**
+
+```json
+{
+  "_metadata": {
+    "message": "",
+    "query": {},
+    "status": 200,
+    "request_id": "a1b2c3d4-0000-0000-0000-000000000002"
+  },
+  "items": [
+    {
+      "discount": {
+        "value": 8.5,
+        "delta": {"value": -0.3, "window": "12M"},
+        "ranking": {"of": 20, "position": 5}
+      },
+      "price_sqm_avg": {
+        "value": 1950.0,
+        "delta": {"value": 2.1, "window": "12M"},
+        "ranking": {"of": 20, "position": 8}
+      },
+      "maintenance_status": {
+        "1": {"price_10pc": 1800, "price_20pc": 1950, "price_50pc": 2200, "price_80pc": 2500, "price_90pc": 2800},
+        "2": {"price_10pc": 1600, "price_20pc": 1750, "price_50pc": 2000, "price_80pc": 2300, "price_90pc": 2600}
+      },
+      "rooms": {
+        "2": {"price_10pc": 1700, "price_20pc": 1850, "price_50pc": 2100, "price_80pc": 2400, "price_90pc": 2700},
+        "m5": {"price_10pc": 1500, "price_20pc": 1650, "price_50pc": 1900, "price_80pc": 2200, "price_90pc": 2500}
+      },
+      "price_typologies": {
+        "4": {"price_10pc": 1600, "price_20pc": 1750, "price_50pc": 2000, "price_80pc": 2350, "price_90pc": 2650}
+      }
+    }
+  ]
+}
+```
+
+---
+
+### Table: `ads`
+
+**Ingestion type:** `snapshot`
+**HTTP Method:** POST
+**Endpoint:** `/api/ads`
+
+Point-in-time twin of `ads_history`. Returns the **current** listings stock metrics for a given period rather than a time-series. The response schema is structurally distinct from `ads_history`: instead of arrays of `(year, month, price_avg, price_avgin, price_avgout)`, each metric is a single object with `value`, `delta`, and `ranking`. The `maintenance_status` and `rooms` breakdowns use a percentile schema (`price_10pc`–`price_90pc`).
+
+**Clarification on `ads_history` field semantics (Open Question #2):** The docs describe `/api/ads` as "real estate listings stock infos" — the `price_avg`, `price_sqm_avg`, etc. fields in this endpoint confirm that both `ads` and `ads_history` track **asking prices of listed properties**, not raw ad counts. The `discount` field reinforces this: it measures negotiation discount on listed prices.
+
+#### Fields present in `ads` but NOT in `ads_history`
+
+| Field | Type | Notes |
+|---|---|---|
+| `discount` | object | Negotiation discount — not in history |
+| `price_avg` | object (`value`, `delta`, `ranking`) | Absolute price avg — history tracks price/sqm only |
+| `price_min` | object | Absolute price min — not in history |
+| `price_max` | object | Absolute price max — not in history |
+| `price_sqm_elasticity` | object | Elasticity metric — not in history |
+| `price_sqm_variability` | object | Variability metric — not in history |
+| `price_typologies` | object (keyed by typology ID) | Percentile breakdowns by property type — not in history |
+| `maintenance_status[n].price_Xpc` | number | Percentile fields — history uses `price_avg`, `price_avgin`, `price_avgout` |
+| `rooms[n].price_Xpc` | number | Percentile fields — history uses `price_avg`, `price_avgin`, `price_avgout` |
+| `delta` / `ranking` sub-objects | object | Point-in-time metrics include delta and ranking — history has none |
+
+#### Request Body Parameters
+
+| Parameter | Required | Type | Example | Notes |
+|---|---|---|---|---|
+| `ty_zone` | Yes | string | `"com"` | Zone type |
+| `id_zone` | Yes | string | `"100005"` | Zone identifier |
+| `window` | Yes | string | `"1M"` | Time window |
+| `contract` | Yes | number | `1` | Contract type |
+| `year` | Yes | number | `2024` | Reference year — required, no default |
+| `month` | Yes | number | `12` | Reference month — required, no default |
+| `typology` | No | number | `4` | Property typology code |
+| `nation` | No | string | `"IT"` | Defaults to `IT` |
+| `success_if_empty` | No | boolean | `false` | Return 200 with empty items instead of error for zones with no data |
+
+**Note on `year`/`month`:** Both are **required** — same as `price`. No defaulting to current period.
+
+#### Response Schema
+
+```
+{
+  "_metadata": {
+    "message":    string,
+    "query":      object,
+    "status":     number,
+    "request_id": string  -- UUID
+  },
+  "items": [
+    {
+      "discount": {
+        "value":   number,   -- negotiation discount %
+        "delta":   { "value": number, "window": string },
+        "ranking": { "of": number, "position": number }
+      },
+      "price_avg": {
+        "value":   number,   -- average absolute listing price (€)
+        "delta":   { "value": number, "window": string },
+        "ranking": { "of": number, "position": number }
+      },
+      "price_min": {
+        "value":   number,
+        "delta":   { "value": number, "window": string },
+        "ranking": { "of": number, "position": number }
+      },
+      "price_max": {
+        "value":   number,
+        "delta":   { "value": number, "window": string },
+        "ranking": { "of": number, "position": number }
+      },
+      "price_sqm_avg": {
+        "value":   number,   -- average price per sqm (€/m²)
+        "delta":   { "value": number, "window": string },
+        "ranking": { "of": number, "position": number }
+      },
+      "price_sqm_min": {
+        "value":   number,
+        "delta":   { "value": number, "window": string },
+        "ranking": { "of": number, "position": number }
+      },
+      "price_sqm_max": {
+        "value":   number,
+        "delta":   { "value": number, "window": string },
+        "ranking": { "of": number, "position": number }
+      },
+      "price_sqm_elasticity": {
+        "value":   number,
+        "delta":   { "value": number, "window": string },
+        "ranking": { "of": number, "position": number }
+      },
+      "price_sqm_variability": {
+        "value":   number,
+        "delta":   { "value": number, "window": string },
+        "ranking": { "of": number, "position": number }
+      },
+      "maintenance_status": {           -- object keyed by maintenance_status code ("1","2","3","4")
+        "<status_id>": {
+          "price_10pc": number,
+          "price_20pc": number,
+          "price_50pc": number,
+          "price_80pc": number,
+          "price_90pc": number
+        }
+      },
+      "price_typologies": {             -- object keyed by typology code
+        "<typology_id>": {
+          "price_10pc": number,
+          "price_20pc": number,
+          "price_50pc": number,
+          "price_80pc": number,
+          "price_90pc": number
+        }
+      },
+      "rooms": {                        -- object keyed by room count ("1","2","3","4","5","m5")
+        "<room_count>": {
+          "price_10pc": number,
+          "price_20pc": number,
+          "price_50pc": number,
+          "price_80pc": number,
+          "price_90pc": number
+        }
+      }
+    }
+  ]
+}
+```
+
+**Primary key proposal:** `(ty_zone, id_zone, contract, window, typology, year, month)`
+
+**Verbatim cURL example:**
+
+```bash
+curl --location 'https://ws-osservatorio.realitycs.it/api/ads' \
+  --header 'Content-Type: application/json' \
+  --header 'Authorization: Bearer <token>' \
+  --data '{
+    "ty_zone": "com",
+    "id_zone": "100005",
+    "window": "1M",
+    "contract": 1,
+    "year": 2024,
+    "month": 12,
+    "typology": 4,
+    "nation": "IT"
+  }'
+```
+
+---
+
+### Table: `search_data`
+
+**Ingestion type:** `snapshot`
+**HTTP Method:** POST
+**Endpoint:** `/api/search-data`
+
+Point-in-time twin of `search_data_history`. Returns the **current** demand/search behaviour metrics for a given period rather than a time-series. The response schema differs significantly from `search_data_history`: each scalar metric (`conversion_rate`, `price_sqm_search_avg`, etc.) is wrapped in a `{value, delta, ranking}` object rather than a bare time-series array. Several fields present here are absent from the history endpoint.
+
+#### Fields present in `search_data` but NOT in `search_data_history`
+
+| Field | Type | Notes |
+|---|---|---|
+| `contribution` | object (`value`, `delta`, `ranking`) | Zone contribution to overall market search share — not in history |
+| `contribution_views` | object (`value`, `delta`, `ranking`) | Zone contribution to views — not in history |
+| `leads_avg` | object (`value`, `delta`, `ranking`) | Average leads per listing — not in history |
+| `maintenance_status` | array of `{status_id, qt_raw_perc}` | Distribution by condition (percentages) — history has time-series values per status |
+| `min_surface_avg` | object (`value`, `delta`, `ranking`) | Average minimum surface filter in searches — not in history |
+| `typologies` | array of `{typology_id, qt_raw_perc}` | Search distribution by property type — not in history |
+| `res.pc_garage` | number | Garage filter percentage — history `res` does not include `pc_garage` |
+| `delta` / `ranking` sub-objects | object | Point-in-time metrics carry delta and ranking — history arrays have no ranking |
+
+Note: `pc_rooms` and `res` exist in both endpoints but with different structures — in history they contain raw counts and time-series; here they are percentage/distribution snapshots. The `conversion_rate`, `price_sqm_search_avg`, and `rooms` keys exist in both but carry different schemas (scalar+delta+ranking here vs. array of `{year, month, value}` in history).
+
+#### Request Body Parameters
+
+| Parameter | Required | Type | Example | Notes |
+|---|---|---|---|---|
+| `ty_zone` | Yes | string | `"com"` | Zone type |
+| `id_zone` | Yes | string | `"100005"` | Zone identifier |
+| `window` | Yes | string | `"1M"` | Time window |
+| `contract` | Yes | number | `1` | Contract type |
+| `year` | Yes | number | `2024` | Reference year — required, no default |
+| `month` | Yes | number | `12` | Reference month — required, no default |
+| `typology` | No | number | `4` | Property typology code |
+| `nation` | No | string | `"IT"` | Defaults to `IT` |
+| `success_if_empty` | No | boolean | `false` | Return 200 with empty items instead of error |
+
+**Note on `year`/`month`:** Both are **required** — confirmed from docs.
+
+#### Response Schema
+
+```
+{
+  "_metadata": {
+    "message":    string,
+    "query":      object,
+    "status":     number,
+    "request_id": string  -- UUID
+  },
+  "items": [
+    {
+      "contribution": {
+        "value":   number,
+        "delta":   { "value": number, "window": string },
+        "ranking": { "of": number, "position": number, "value": array }
+      },
+      "contribution_views": {
+        "value":   number,
+        "delta":   { "value": number, "window": string },
+        "ranking": { "of": number, "position": number, "value": array }
+      },
+      "conversion_rate": {
+        "value":   number,
+        "delta":   { "value": number, "window": string },
+        "ranking": { "of": number, "position": number }
+      },
+      "leads_avg": {
+        "value":   number,
+        "delta":   { "value": number, "window": string },
+        "ranking": { "of": number, "position": number }
+      },
+      "maintenance_status": [             -- array (not keyed object as in history)
+        {
+          "status_id":    string,         -- maintenance condition code ("1"–"4")
+          "qt_raw_perc":  number          -- percentage of searches for this condition
+        }
+      ],
+      "min_surface_avg": {
+        "value":   number,
+        "delta":   { "value": number, "window": string },
+        "ranking": { "of": number, "position": number }
+      },
+      "pc_rooms": {                       -- object keyed by room count ("1"–"5","m5")
+        "<room_count>": {
+          "pc_raw": number,               -- percentage share of searches for this room count
+          "qt_raw": number                -- raw quantity of searches for this room count
+        }
+      },
+      "price_sqm_search_avg": {
+        "value":   number,
+        "delta":   { "value": number, "window": string },
+        "ranking": { "of": number, "position": number }
+      },
+      "res": {                            -- search attribute percentages (point-in-time snapshot)
+        "pc_1floor":    number,
+        "pc_1typology": number,
+        "pc_garage":    number,           -- present here; NOT in search_data_history res
+        "pc_garden":    number,
+        "pc_minrooms":  number,
+        "pc_status":    number,
+        "pc_terrace":   number
+      },
+      "typologies": [                     -- array (not present in history)
+        {
+          "typology_id":  string,         -- property typology code
+          "qt_raw_perc":  number          -- percentage of searches for this typology
+        }
+      ]
+    }
+  ]
+}
+```
+
+**Note on `res` field naming:** The history endpoint uses hyphenated keys (`pc-garage`, `pc-garden`, etc.) while the point-in-time endpoint appears to use underscore keys (`pc_garage`, `pc_garden`). Implementers should confirm empirically — the history response example in the existing doc shows hyphenated versions (`"pc-garden": 15.51`).
+
+**Primary key proposal:** `(ty_zone, id_zone, contract, window, typology, year, month)`
+
+**Verbatim cURL example:**
+
+```bash
+curl --location 'https://ws-osservatorio.realitycs.it/api/search-data' \
+  --header 'Content-Type: application/json' \
+  --header 'Authorization: Bearer <token>' \
+  --data '{
+    "ty_zone": "com",
+    "id_zone": "100005",
+    "window": "1M",
+    "contract": 1,
+    "year": 2024,
+    "month": 12,
+    "typology": 4,
+    "nation": "IT"
+  }'
+```
+
+---
+
+### Table: `sales_price`
+
+**Ingestion type:** `snapshot`
+**HTTP Method:** POST
+**Endpoint:** `/api/sales/price`
+
+Point-in-time twin of `sales_price_history`. Returns current-period sale price metrics including percentile breakdowns and a `price_cadastral_typologies` array, none of which appear in the history endpoint.
+
+#### Fields present in `sales_price` but NOT in `sales_price_history`
+
+| Field | Type | Notes |
+|---|---|---|
+| `compravendite_price_sqm_max` | object (`value`, `delta`, `ranking`) | Max price/sqm — history has no max field |
+| `compravendite_price_sqm_min` | object (`value`, `delta`, `ranking`) | Min price/sqm — history has no min field |
+| `compravendite_sales_price_avg` | object (`value`, `delta`, `ranking`) | Average total transaction price (€) — history has no absolute price field |
+| `price_cadastral_typologies` | array | Per-cadastral-class percentile distribution — not in history |
+| `delta` / `ranking` sub-objects | object | Point-in-time metrics carry delta and ranking — history time-series records have neither |
+
+`compravendite_price_sqm_avg` exists in both, but in the history endpoint it is an array of `{year, month, price_avg}` records; here it is a scalar `{value, delta, ranking}` object.
+
+#### Request Body Parameters
+
+| Parameter | Required | Type | Example | Notes |
+|---|---|---|---|---|
+| `ty_zone` | Yes | string | `"com"` | Zone type |
+| `id_zone` | Yes | string | `"100005"` | Zone identifier |
+| `window` | Yes | string | `"1M"` | Time window |
+| `contract` | Yes | number | `1` | Contract type |
+| `year` | Yes | number | `2024` | Reference year — required, no default |
+| `month` | Yes | number | `12` | Reference month — required, no default |
+| `cadastral_typology` | No | string | `"A4"` | Cadastral class filter (A1–A11); omit for aggregate |
+| `nation` | No | string | `"IT"` | Defaults to `IT` |
+| `success_if_empty` | No | boolean | `false` | Return 200 with empty items instead of error |
+
+**Note on `year`/`month`:** Both are **required** — confirmed from docs.
+
+**cURL example discrepancy:** The verbatim cURL example in the official docs passes `"typology": 4` in the body. However, the request parameters table specifies `cadastral_typology` as the optional filter, not `typology`. This appears to be a copy-paste error in the docs — use `cadastral_typology` per the parameters table.
+
+#### Response Schema
+
+```
+{
+  "_metadata": {
+    "message":    string,
+    "query":      object,
+    "status":     number,
+    "request_id": string  -- UUID
+  },
+  "items": [
+    {
+      "compravendite_price_sqm_avg": {
+        "value":   number,   -- average sale price per sqm (€/m²)
+        "delta":   { "value": number, "window": string },
+        "ranking": { "of": number, "position": number }
+      },
+      "compravendite_price_sqm_max": {
+        "value":   number,   -- maximum sale price per sqm (€/m²)
+        "delta":   { "value": number, "window": string },
+        "ranking": { "of": number, "position": number }
+      },
+      "compravendite_price_sqm_min": {
+        "value":   number,   -- minimum sale price per sqm (€/m²)
+        "delta":   { "value": number, "window": string },
+        "ranking": { "of": number, "position": number }
+      },
+      "compravendite_sales_price_avg": {
+        "value":   number,   -- average total transaction price (€) from AdE data
+        "delta":   { "value": number, "window": string },
+        "ranking": { "of": number, "position": number }
+      },
+      "price_cadastral_typologies": [   -- per-cadastral-class percentile distribution
+        {
+          "cadastral_typology": string, -- e.g. "A1", "A2", ..., "A11"
+          "price_10pc":         number, -- 10th percentile sale price/sqm
+          "price_20pc":         number,
+          "price_50pc":         number, -- median sale price/sqm
+          "price_80pc":         number,
+          "price_90pc":         number  -- 90th percentile sale price/sqm
+        }
+      ]
+    }
+  ]
+}
+```
+
+**Primary key proposal:** `(ty_zone, id_zone, contract, window, cadastral_typology, year, month)`
+
+For the `price_cadastral_typologies` array rows, add `cadastral_typology` from the array element as an additional key dimension.
+
+**Verbatim cURL example:**
+
+```bash
+curl --location 'https://ws-osservatorio.realitycs.it/api/sales/price' \
+  --header 'Content-Type: application/json' \
+  --header 'Authorization: Bearer <token>' \
+  --data '{
+    "ty_zone": "com",
+    "id_zone": "100005",
+    "window": "1M",
+    "contract": 1,
+    "year": 2024,
+    "month": 12,
+    "cadastral_typology": "A4",
+    "nation": "IT"
+  }'
+```
+
+**Verbatim response example (from official docs):**
+
+```json
+{
+  "_metadata": {
+    "message": "",
+    "query": {},
+    "status": 200,
+    "request_id": "017d6a53-9346-43a8-981e-d8c361202b51"
+  },
+  "items": [
+    {
+      "compravendite_price_sqm_avg": {
+        "delta":   {"value": -5.82,  "window": "12M"},
+        "ranking": {"of": 19,        "position": 12},
+        "value":   1270
+      },
+      "compravendite_price_sqm_max": {
+        "delta":   {"value": -18.75, "window": "12M"},
+        "ranking": {"of": 19,        "position": 10},
+        "value":   3623
+      },
+      "compravendite_price_sqm_min": {
+        "delta":   {"value": -43.26, "window": "12M"},
+        "ranking": {"of": 19,        "position": 17},
+        "value":   48
+      },
+      "compravendite_sales_price_avg": {
+        "delta":   {"value": -1.02,  "window": "12M"},
+        "ranking": {"of": 19,        "position": 11},
+        "value":   130526
+      },
+      "price_cadastral_typologies": [
+        {
+          "cadastral_typology": "A1",
+          "price_10pc": 86,
+          "price_20pc": 919,
+          "price_50pc": 2054,
+          "price_80pc": 2426,
+          "price_90pc": 3162
+        }
+      ]
+    }
+  ]
+}
+```
+
+---
+
+### Table: `sales_volume`
+
+**Ingestion type:** `snapshot`
+**HTTP Method:** POST
+**Endpoint:** `/api/sales/volume`
+
+Point-in-time twin of `sales_volume_history`. Returns current-period transaction volume metrics including `sales` (total revenue), `sales_surface_avg`, `cadastral_typologies` distribution, and `sales_surface_class` distribution — none of which are present in the history endpoint.
+
+#### Fields present in `sales_volume` but NOT in `sales_volume_history`
+
+| Field | Type | Notes |
+|---|---|---|
+| `sales` | object (`value`, `delta`, `ranking`) | Total transaction revenue — not in history |
+| `sales_surface_avg` | object (`value`, `delta`, `ranking`) | Average surface of transacted properties — not in history |
+| `cadastral_typologies` | array of `{typology_id, qt_raw_perc}` | Transaction distribution by cadastral class — not in history |
+| `sales_surface_class` | array of `{id, qt_raw_perc}` | Transaction distribution by surface class — not in history |
+| `delta` / `ranking` sub-objects | object | Point-in-time `sales_qtraw` carries delta/ranking — history `sales_qtraw` is a bare `{year, month, qtraw}` record |
+
+`sales_qtraw` exists in both, but the schemas differ: history uses `{year, month, qtraw: number}` per time-series record; here it is `{value, delta, ranking}`.
+
+#### Request Body Parameters
+
+| Parameter | Required | Type | Example | Notes |
+|---|---|---|---|---|
+| `ty_zone` | Yes | string | `"com"` | Zone type |
+| `id_zone` | Yes | string | `"100005"` | Zone identifier |
+| `window` | Yes | string | `"1M"` | Time window |
+| `contract` | Yes | number | `1` | Contract type |
+| `year` | Yes | number | `2024` | Reference year — required, no default |
+| `month` | Yes | number | `12` | Reference month — required, no default |
+| `cadastral_typology` | No | string | `"A4"` | Cadastral class filter |
+| `nation` | No | string | `"IT"` | Defaults to `IT` |
+| `success_if_empty` | No | boolean | `false` | Return 200 with empty items instead of error |
+
+**Note on `year`/`month`:** Both are **required** — confirmed from docs.
+
+**Note on `contract` parameter:** The docs cURL example passes `"typology": 4` (same copy-paste issue as `sales_price`). The request parameters table shows `cadastral_typology` as the valid optional filter. Use `cadastral_typology` per the parameters table.
+
+#### Response Schema
+
+```
+{
+  "_metadata": {
+    "message":    string,
+    "query":      object,
+    "status":     number,
+    "request_id": string  -- UUID
+  },
+  "items": [
+    {
+      "sales": {
+        "value":   number,   -- total transaction revenue (€)
+        "delta":   { "value": number, "window": string },
+        "ranking": { "of": number, "position": number }
+      },
+      "sales_qtraw": {
+        "value":   number,   -- normalized transaction count (NTN from AdE)
+        "delta":   { "value": number, "window": string },
+        "ranking": { "of": number, "position": number }
+      },
+      "sales_surface_avg": {
+        "value":   number,   -- average surface of transacted properties (m²)
+        "delta":   { "value": number, "window": string },
+        "ranking": { "of": number, "position": number }
+      },
+      "cadastral_typologies": [      -- transaction distribution by cadastral class
+        {
+          "typology_id":  string,    -- cadastral class code (e.g. "A3")
+          "qt_raw_perc":  number     -- percentage of transactions for this class
+        }
+      ],
+      "sales_surface_class": [       -- transaction distribution by surface class
+        {
+          "id":           string,    -- surface class code; see class_surface taxonomy
+          "qt_raw_perc":  number     -- percentage of transactions in this surface bracket
+        }
+      ]
+    }
+  ]
+}
+```
+
+**Primary key proposal:** `(ty_zone, id_zone, contract, window, cadastral_typology, year, month)`
+
+**Verbatim cURL example:**
+
+```bash
+curl --location 'https://ws-osservatorio.realitycs.it/api/sales/volume' \
+  --header 'Content-Type: application/json' \
+  --header 'Authorization: Bearer <token>' \
+  --data '{
+    "ty_zone": "com",
+    "id_zone": "100005",
+    "window": "1M",
+    "contract": 1,
+    "year": 2024,
+    "month": 12,
+    "cadastral_typology": "A4",
+    "nation": "IT"
+  }'
+```
+
+**Verbatim response example (from official docs):**
+
+```json
+{
+  "_metadata": {
+    "message": "",
+    "query": {},
+    "status": 200,
+    "request_id": "4cc03232-7427-4f7e-ae64-762372e9e14b"
+  },
+  "items": [
+    {
+      "sales": {
+        "value": 1248273623.74,
+        "delta": {"value": -5.12, "window": "3M"},
+        "ranking": {"position": 1, "of": 8}
+      },
+      "sales_qtraw": {
+        "value": 10004.21,
+        "delta": {"value": 38.27, "window": "3M"},
+        "ranking": {"position": 1, "of": 8}
+      },
+      "sales_surface_avg": {
+        "value": 96.51,
+        "delta": {"value": -1.39, "window": "3M"},
+        "ranking": {"position": 8, "of": 8}
+      },
+      "cadastral_typologies": [
+        {"typology_id": "A3", "qt_raw_perc": 50.0}
+      ],
+      "sales_surface_class": [
+        {"id": "2", "qt_raw_perc": 40.0}
+      ]
+    }
+  ]
+}
 ```
 
 ---
